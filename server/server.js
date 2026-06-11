@@ -1,3 +1,5 @@
+import dotenv from "dotenv";
+dotenv.config();
 /**
  * Intelligent Investor — Backend Proxy Server
  *
@@ -40,6 +42,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // ── Simple in-memory cache ────────────────────────────────────────────
 const cache = new Map();
@@ -459,6 +462,26 @@ app.post('/api/ai/complete', async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════
 // HEALTH CHECK
 // ════════════════════════════════════════════════════════════════════════
+
+app.post('/api/schwab/token', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader) return res.status(400).json({error:'Missing auth'});
+    const body = new URLSearchParams();
+    const gt = req.body.refresh_token ? 'refresh_token' : 'authorization_code';
+    body.append('grant_type', req.body.grant_type || gt);
+    if (req.body.code) body.append('code', req.body.code);
+    if (req.body.refresh_token) body.append('refresh_token', req.body.refresh_token);
+    body.append('redirect_uri', req.body.redirect_uri || 'https://127.0.0.1');
+    const r = await fetch('https://api.schwabapi.com/v1/oauth/token', {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded','Authorization':authHeader},
+      body: body.toString()
+    });
+    const t = await r.text();
+    res.status(r.status).set('Content-Type','application/json').send(t);
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
 
 app.get('/health', (req, res) => {
   res.json({
