@@ -483,6 +483,38 @@ app.post('/api/schwab/token', async (req, res) => {
   } catch(e) { res.status(500).json({error:e.message}); }
 });
 
+// ════════════════════════════════════════════════════════════════════════
+// SCHWAB MARKET DATA PROXY
+// ════════════════════════════════════════════════════════════════════════
+/**
+ * GET /api/schwab/quote?symbols=AAPL&fields=quote,fundamental
+ * Forwards the browser's Schwab access token (Authorization: Bearer ...)
+ * to Schwab's marketdata API. Schwab does not allow direct browser calls
+ * to api.schwabapi.com (CORS), so this must go through the backend.
+ */
+app.get('/api/schwab/quote', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader) return bad(res, 401, 'Missing Authorization header');
+
+    const { symbols, fields } = req.query;
+    if (!symbols) return bad(res, 400, 'symbols is required');
+
+    const url = `https://api.schwabapi.com/marketdata/v1/quotes`
+      + `?symbols=${encodeURIComponent(symbols)}`
+      + `&fields=${encodeURIComponent(fields || 'quote,fundamental')}`;
+
+    const r = await fetch(url, {
+      headers: { 'Authorization': authHeader, 'Accept': 'application/json' },
+      timeout: 10_000,
+    });
+    const t = await r.text();
+    res.status(r.status).set('Content-Type', 'application/json').send(t);
+  } catch (e) {
+    bad(res, 502, `Schwab quote proxy failed: ${e.message}`);
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
