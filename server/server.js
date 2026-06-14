@@ -287,7 +287,8 @@ app.get('/api/fmp/profile', async (req, res) => {
 
 /**
  * GET /api/fmp/financials?symbol=AAPL
- * Returns income, cashflow, balance, ratios, earnings in one request
+ * Returns income, cashflow, balance, ratios, earnings, analystEst,
+ * keyMetrics, evMetrics in one request
  */
 app.get('/api/fmp/financials', async (req, res) => {
   try {
@@ -300,12 +301,20 @@ app.get('/api/fmp/financials', async (req, res) => {
     const hit = cGet(ck);
     if (hit) return ok(res, hit, 300);
 
-    const [income, cashflow, balance, ratios, earnings] = await Promise.all([
+    const [income, cashflow, balance, ratios, earnings, analystEst, keyMetrics, evMetrics] = await Promise.all([
       fmpFetch('/income-statement',        { symbol: sym, period: 'annual', limit: 10 }),
       fmpFetch('/cash-flow-statement',     { symbol: sym, period: 'annual', limit: 10 }),
       fmpFetch('/balance-sheet-statement', { symbol: sym, period: 'annual', limit: 5  }),
       fmpFetch('/ratios',                  { symbol: sym, period: 'annual', limit: 10 }),
       fmpFetch('/earnings',                { symbol: sym, limit: 16 }),
+      // Analyst consensus EPS estimates — used for forward P/E (1yr/3yr).
+      // Some small/illiquid tickers have no analyst coverage; don't let
+      // that fail the whole /financials response.
+      fmpFetch('/analyst-estimates',       { symbol: sym, period: 'annual', limit: 4 }).catch(() => null),
+      // Key metrics — provides bookValuePerShare for live P/B recompute.
+      fmpFetch('/key-metrics',             { symbol: sym, period: 'annual', limit: 10 }).catch(() => null),
+      // Enterprise values — provides live shares outstanding / EV/EBITDA inputs.
+      fmpFetch('/enterprise-values',       { symbol: sym, period: 'annual', limit: 10 }).catch(() => null),
     ]);
 
     // Normalise valuationHistory from ratios
@@ -319,7 +328,7 @@ app.get('/api/fmp/financials', async (req, res) => {
       })).reverse()
     );
 
-    const payload = { symbol: sym, income, cashflow, balance, ratios, earnings, valuationHistory, fetchedAt: new Date().toISOString() };
+    const payload = { symbol: sym, income, cashflow, balance, ratios, earnings, analystEst, keyMetrics, evMetrics, valuationHistory, fetchedAt: new Date().toISOString() };
     cSet(ck, payload, 300_000);
     ok(res, payload, 300);
   } catch (e) {
