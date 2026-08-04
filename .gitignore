@@ -1,0 +1,6 @@
+.env
+node_modules/
+logs/
+*.bak
+*.bak-*
+*.bak[0-9]*

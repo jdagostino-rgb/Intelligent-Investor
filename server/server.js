@@ -17,6 +17,10 @@ dotenv.config();
 import express from 'express';
 import fetch   from 'node-fetch';
 import cors    from 'cors';
+import kbRouter, { kbContextText } from './kb.js';
+import valuationRouter from './valuation.js';
+import edgarRouter from './edgar.js';
+import screenerRouter from './screener.js';
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -43,6 +47,10 @@ app.use(cors({
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/api/kb', kbRouter);
+app.use('/api/valuation', valuationRouter);
+app.use('/api/edgar', edgarRouter);
+app.use('/api/screen', screenerRouter);
 
 // ── Simple in-memory cache ────────────────────────────────────────────
 const cache = new Map();
@@ -318,14 +326,29 @@ app.get('/api/fmp/financials', async (req, res) => {
     ]);
 
     // Normalise valuationHistory from ratios
+    const num = v => (typeof v === 'number' && isFinite(v)) ? v : null;
     const valuationHistory = normalizeValuationHistory(
-      (Array.isArray(ratios) ? ratios : []).slice(0, 8).map(r => ({
-        year:     parseInt(r.calendarYear || r.date?.substring(0, 4) || 0),
-        pe:       r.priceEarningsRatio    || null,
-        pb:       r.priceToBookRatio      || null,
-        roe:      r.returnOnEquity        ? r.returnOnEquity * 100 : null,
-        fcfYield: r.freeCashFlowYield     ? r.freeCashFlowYield * 100 : null,
-      })).reverse()
+      (Array.isArray(ratios) ? ratios : []).slice(0, 8).map(r => {
+        const pe = num(r.priceToEarningsRatio)
+                ?? num(r.priceToEarningsDilutedRatio)
+                ?? num(r.priceEarningsRatio);
+        const nips = num(r.netIncomePerShare);
+        const sepc = num(r.shareholdersEquityPerShare);
+        const roe  = (nips !== null && sepc !== null && sepc !== 0)
+                   ? (nips / sepc) * 100
+                   : (num(r.returnOnEquity) !== null ? r.returnOnEquity * 100 : null);
+        const pfcf = num(r.priceToFreeCashFlowRatio);
+        const fcfYield = (pfcf !== null && pfcf !== 0)
+                       ? (1 / pfcf) * 100
+                       : (num(r.freeCashFlowYield) !== null ? r.freeCashFlowYield * 100 : null);
+        return {
+          year:     parseInt(r.fiscalYear || r.calendarYear || (r.date || '').substring(0, 4) || 0),
+          pe:       pe,
+          pb:       num(r.priceToBookRatio),
+          roe:      roe,
+          fcfYield: fcfYield,
+        };
+      }).reverse()
     );
 
     const payload = { symbol: sym, income, cashflow, balance, ratios, earnings, analystEst, keyMetrics, evMetrics, valuationHistory, fetchedAt: new Date().toISOString() };
@@ -372,7 +395,7 @@ app.get('/api/fmp/screener', async (req, res) => {
     const hit    = cGet(ck);
     if (hit) return ok(res, hit, 300);
 
-    const j = await fmpFetch('/company-screener', params);
+    const j = await fmpFetch('/stock-screener', params);
     cSet(ck, j, 300_000);
     ok(res, j, 300);
   } catch (e) {
@@ -422,6 +445,8 @@ app.get('/api/fmp/insider', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════
+app.get("/api/fmp/etf-holder",async(req,res)=>{try{const{symbol}=req.query;if(!symbol)return bad(res,400,"symbol required");if(!FMP_KEY)return bad(res,500,"no key");const sym=symbol.toUpperCase();const _eu=`https://financialmodelingprep.com/api/v3/etf-holder/${encodeURIComponent(sym)}?apikey=${FMP_KEY}`;const j=await new Promise((res,rej)=>{require("https").get(_eu,r=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>{try{res(JSON.parse(d));}catch(e){res(null);}});}).on("error",()=>res(null));});ok(res,j,3600);}catch(e){bad(res,502,e.message);}});
+app.get("/api/fmp/earning_calendar",async(req,res)=>{try{const{symbol}=req.query;if(!symbol)return bad(res,400,"symbol required");if(!FMP_KEY)return bad(res,500,"no key");const sym=symbol.toUpperCase();const j=await fmpFetch("/earnings-calendar",{symbol:sym});ok(res,j,3600);}catch(e){bad(res,502,e.message);}});
 // ANTHROPIC PROXY
 // ════════════════════════════════════════════════════════════════════════
 
@@ -437,11 +462,17 @@ app.post('/api/ai/complete', async (req, res) => {
     const { messages, max_tokens = 1000, system } = req.body;
     if (!messages || !Array.isArray(messages)) return bad(res, 400, 'messages array is required');
 
+    let kbSystem = system || '';
+    try {
+      const ctx = await kbContextText(req.body.kb_ticker || null);
+      if (ctx) kbSystem = kbSystem ? kbSystem + '\n\n' + ctx : ctx;
+    } catch {}
+
     const body = {
       model:      'claude-sonnet-4-6',
       max_tokens,
       messages,
-      ...(system ? { system } : {}),
+      ...(kbSystem ? { system: kbSystem } : {}),
     };
 
     const r = await fetch('https://api.anthropic.com/v1/messages', {
