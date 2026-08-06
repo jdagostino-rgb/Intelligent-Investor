@@ -19,7 +19,7 @@ import fetch   from 'node-fetch';
 import cors    from 'cors';
 import kbRouter, { kbContextText } from './kb.js';
 import valuationRouter from './valuation.js';
-import edgarRouter from './edgar.js';
+import edgarRouter, { ttmRouter } from './edgar.js';
 import screenerRouter from './screener.js';
 
 const app  = express();
@@ -50,6 +50,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/api/kb', kbRouter);
 app.use('/api/valuation', valuationRouter);
 app.use('/api/edgar', edgarRouter);
+app.use('/api/edgar-ttm', ttmRouter);
 app.use('/api/screen', screenerRouter);
 
 // ── Simple in-memory cache ────────────────────────────────────────────
@@ -552,6 +553,57 @@ app.get('/api/schwab/quote', async (req, res) => {
     res.status(r.status).set('Content-Type', 'application/json').send(t);
   } catch (e) {
     bad(res, 502, `Schwab quote proxy failed: ${e.message}`);
+  }
+});
+
+
+// ════════════════════════════════════════════════════════════════════════
+// FMP PASSTHROUGH
+// The frontend calls ~14 FMP endpoints that were never implemented here
+// (income-statement, balance-sheet-statement, cash-flow-statement, ratios,
+// key-metrics, earnings, analyst-estimates, enterprise-values, historical
+// price, insider-trading, institutional-ownership, historical-rating,
+// key-metrics-ttm, revenue-product-segmentation). Every one returned 404,
+// so criteria 4/5/7/8 were scoring on AI estimates instead of filings -
+// the exact opposite of the DATA-DRIVEN SCORES FIRST rule.
+//
+// This forwards any /api/fmp/<path> to FMP's stable API with the key
+// attached. Declared AFTER the specific routes above, so those still win.
+// ════════════════════════════════════════════════════════════════════════
+app.get('/api/fmp/*', async (req, res) => {
+  try {
+    if (!FMP_KEY) return bad(res, 500, 'FMP_API_KEY not configured on server');
+    const sub = req.params[0];
+    if (!sub) return bad(res, 400, 'endpoint path required');
+
+    const params = { ...req.query };
+    delete params.t;                       // cache-buster, not an FMP param
+
+    const ck = `fmpx:${sub}:${JSON.stringify(params)}`;
+    const hit = cGet(ck);
+    if (hit) return ok(res, hit, 300);
+
+    const qs = new URLSearchParams({ ...params, apikey: FMP_KEY }).toString();
+    const r = await fetch(`${FMP_BASE}/${sub}?${qs}`, { timeout: 20_000 });
+    const text = await r.text();
+
+    if (!r.ok) {
+      return res.status(r.status).json({
+        error: `FMP ${r.status} on /${sub}`,
+        hint: r.status === 403
+          ? 'Endpoint likely not included in your FMP plan.'
+          : 'Check the endpoint path against FMP stable API docs.',
+        body: text.slice(0, 300),
+      });
+    }
+    let j;
+    try { j = JSON.parse(text); }
+    catch (e) { return bad(res, 502, `FMP returned non-JSON on /${sub}: ${text.slice(0, 120)}`); }
+
+    cSet(ck, j, 300_000);
+    ok(res, j, 300);
+  } catch (e) {
+    bad(res, 502, `FMP passthrough failed: ${e.message}`);
   }
 });
 

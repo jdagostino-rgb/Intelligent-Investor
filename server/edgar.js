@@ -1133,4 +1133,71 @@ router.get('/health', async (req, res) => {
   }
 });
 
+
+/* ============================================================
+   /api/edgar-ttm/:symbol
+   The frontend calls this to get TTM EPS straight from filings and
+   recompute P/E against the live price, instead of trusting a vendor
+   or an AI estimate. Mounted separately in server.js.
+   ============================================================ */
+export const ttmRouter = express.Router();
+
+ttmRouter.get('/:symbol', async (req, res) => {
+  try {
+    const symbol = String(req.params.symbol || '').toUpperCase();
+    if (!symbol) return bad(res, 400, 'symbol is required');
+    await ensureSchema();
+    const sync = await ensureSynced(symbol);
+    if (sync.supported === false)
+      return res.status(422).json({ symbol, error: 'UNSUPPORTED for XBRL', detail: sync.warning });
+
+    const [eps, ni, rev, op, sh] = await Promise.all([
+      ttmDuration(symbol, ['EarningsPerShareDiluted', 'EarningsPerShareBasicAndDiluted',
+                           'EarningsPerShareBasic']),
+      ttmDuration(symbol, ['NetIncomeLoss']),
+      ttmDuration(symbol, ['Revenues', 'RevenueFromContractWithCustomerExcludingAssessedTax']),
+      ttmDuration(symbol, ['OperatingIncomeLoss']),
+      ttmDuration(symbol, ['WeightedAverageNumberOfDilutedSharesOutstanding']),
+    ]);
+
+    let ttmEPS = eps.value;
+    let epsSource = 'sum of quarterly diluted EPS';
+    if (ttmEPS == null && ni.value != null && sh.value) {
+      // quarterly EPS not tagged - derive. Share counts are weighted averages
+      // per period, so use the median rather than the sum.
+      const shares = sh.value / (sh.quarters ? sh.quarters.length : 4);
+      if (shares) { ttmEPS = ni.value / shares; epsSource = 'net income / avg diluted shares'; }
+    }
+    if (ttmEPS == null)
+      return res.status(422).json({ symbol, error: 'TTM EPS not derivable from XBRL' });
+
+    const shares = (sh.value && sh.quarters) ? sh.value / sh.quarters.length : null;
+    const coreEPS = (op.value != null && shares) ? (op.value * 0.79) / shares : null;
+    const nonOpPct = (ni.value && op.value != null)
+      ? +(((ni.value - op.value) / ni.value) * 100).toFixed(1) : null;
+
+    res.json({
+      ticker: symbol,
+      ttmEPS: +Number(ttmEPS).toFixed(4),
+      epsSource,
+      ttmNetIncomeB: ni.value != null ? +(ni.value / 1e9).toFixed(2) : null,
+      ttmRevenueB: rev.value != null ? +(rev.value / 1e9).toFixed(2) : null,
+      ttmOperatingIncomeB: op.value != null ? +(op.value / 1e9).toFixed(2) : null,
+      sharesDilutedB: shares ? +(shares / 1e9).toFixed(3) : null,
+      coreEPSApprox: coreEPS != null ? +coreEPS.toFixed(4) : null,
+      nonOperatingPctOfNetIncome: nonOpPct,
+      earningsQualityFlag: (nonOpPct != null && nonOpPct > 10)
+        ? 'A large share of net income is non-operating - headline EPS and P/E flatter or '
+          + 'distort the operating business. Compare coreEPSApprox.'
+        : null,
+      periods: eps.periods || ni.periods || null,
+      derivation: eps.method || ni.method,
+      source: 'SEC XBRL (as filed)',
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    bad(res, 500, `edgar-ttm failed: ${e.message}`);
+  }
+});
+
 export default router;
