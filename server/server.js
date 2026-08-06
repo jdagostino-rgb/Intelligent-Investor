@@ -20,6 +20,7 @@ import cors    from 'cors';
 import kbRouter, { kbContextText } from './kb.js';
 import valuationRouter from './valuation.js';
 import edgarRouter, { ttmRouter } from './edgar.js';
+import ownershipRouter from './ownership.js';
 import screenerRouter from './screener.js';
 
 const app  = express();
@@ -51,6 +52,7 @@ app.use('/api/kb', kbRouter);
 app.use('/api/valuation', valuationRouter);
 app.use('/api/edgar', edgarRouter);
 app.use('/api/edgar-ttm', ttmRouter);
+app.use('/api/ownership', ownershipRouter);
 app.use('/api/screen', screenerRouter);
 
 // ── Simple in-memory cache ────────────────────────────────────────────
