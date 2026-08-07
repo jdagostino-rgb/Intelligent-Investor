@@ -1200,4 +1200,122 @@ ttmRouter.get('/:symbol', async (req, res) => {
   }
 });
 
+
+/* ============================================================
+   BDC ANALYTICS  ->  mounted at /api/bdc in server.js
+   A business development company is a pool of loans marked quarterly.
+   P/E is close to meaningless. The questions that matter are:
+     1. price vs NAV        - premium or discount to the marked book
+     2. NII vs distribution - is the payout earned, or funded elsewhere
+     3. portfolio mark      - fair value against cost, the credit signal
+     4. leverage            - statutory cap is roughly 2:1 debt to equity
+   Non-accruals are disclosed in narrative tables, not XBRL, so they
+   remain a manual read and are flagged as such rather than guessed.
+   ============================================================ */
+export const bdcRouter = express.Router();
+
+bdcRouter.get('/analyze', async (req, res) => {
+  try {
+    const symbol = String(req.query.symbol || '').toUpperCase();
+    if (!symbol) return bad(res, 400, 'symbol is required');
+    await ensureSchema();
+    const sync = await ensureSynced(symbol);
+    if (sync.supported === false) return bad(res, 422, `${symbol} UNSUPPORTED. ${sync.warning || ''}`);
+
+    const [nav, fv, cost, equity, debt, shares] = await Promise.all([
+      latestInstant(symbol, ['NetAssetValuePerShare']),
+      latestInstant(symbol, ['InvestmentOwnedAtFairValue']),
+      latestInstant(symbol, ['InvestmentOwnedAtCost']),
+      latestInstant(symbol, ['StockholdersEquity', 'AssetsNet', 'NetAssetValue']),
+      latestInstant(symbol, ['DebtLongtermAndShorttermCombinedAmount', 'LongTermDebt',
+                             'LongTermDebtNoncurrent', 'SecuredDebt', 'UnsecuredDebt',
+                             'LineOfCreditFacilityAmountOutstanding', 'NotesPayable']),
+      latestInstant(symbol, ['CommonStockSharesOutstanding', 'EntityCommonStockSharesOutstanding']),
+    ]);
+
+    const [nii, divs] = await Promise.all([
+      ttmCashFlow(symbol, ['NetInvestmentIncome', 'InvestmentIncomeOperatingAfterExpenseAndTax']),
+      ttmCashFlow(symbol, ['DividendsCommonStock', 'DividendsCommonStockCash',
+                           'PaymentsOfDividendsCommonStock']),
+    ]);
+
+    // live price via our own FMP proxy
+    let price = null;
+    try {
+      const port = process.env.PORT || 3001;
+      const r = await fetch(`http://127.0.0.1:${port}/api/fmp/quote?symbol=${symbol}`, { timeout: 12000 });
+      const j = await r.json();
+      const qd = Array.isArray(j) ? j[0] : j;
+      if (qd && typeof qd.price === 'number') price = qd.price;
+    } catch (e) { /* price optional */ }
+
+    const num = (r) => (r && r.val != null ? Number(r.val) : null);
+    const navPS = num(nav);
+    const B = (x) => (x == null ? null : +(x / 1e9).toFixed(2));
+    const rnd = (x) => (x == null || !isFinite(x) ? null : +x.toFixed(3));
+
+    const priceToNav = (price && navPS) ? price / navPS : null;
+    const coverage = (nii.value != null && divs.value) ? nii.value / Math.abs(divs.value) : null;
+    const markRatio = (num(fv) && num(cost)) ? num(fv) / num(cost) : null;
+    const leverage = (num(debt) && num(equity)) ? num(debt) / num(equity) : null;
+
+    const flags = [];
+    if (coverage != null && coverage < 1)
+      flags.push(`Net investment income covers only ${(coverage * 100).toFixed(0)}% of distributions. `
+        + 'The shortfall is being funded from realised gains, return of capital or leverage - not '
+        + 'from recurring investment income.');
+    if (coverage != null && coverage >= 1 && coverage < 1.05)
+      flags.push('Distribution coverage is under 1.05x - little margin if credit deteriorates.');
+    if (markRatio != null && markRatio < 0.98)
+      flags.push(`Portfolio is marked at ${(markRatio * 100).toFixed(1)}% of cost - the book is `
+        + 'carrying unrealised losses, which typically precedes NAV decline.');
+    if (leverage != null && leverage > 1.15)
+      flags.push(`Debt-to-equity of ${leverage.toFixed(2)}x. BDCs are capped near 2:1 by statute; `
+        + 'the closer to the cap, the less room to absorb adverse marks.');
+    if (priceToNav != null && priceToNav > 1.1)
+      flags.push(`Trading at ${((priceToNav - 1) * 100).toFixed(0)}% premium to NAV - you are paying `
+        + 'above the marked value of the underlying loans.');
+    if (priceToNav != null && priceToNav < 0.9)
+      flags.push(`Trading at ${((1 - priceToNav) * 100).toFixed(0)}% discount to NAV.`);
+    flags.push('NON-ACCRUALS ARE NOT IN XBRL. Loans on non-accrual are disclosed in narrative '
+      + 'tables in the 10-Q/10-K and must be read directly. They are the leading credit signal '
+      + 'for a BDC and are NOT reflected in any figure here.');
+
+    res.json({
+      symbol, type: 'BDC',
+      valuation: {
+        pricePerShare: price,
+        navPerShare: navPS,
+        navAsOf: nav ? new Date(nav.end_date).toISOString().slice(0, 10) : null,
+        priceToNav: rnd(priceToNav),
+        premiumDiscountPct: priceToNav != null ? +(((priceToNav - 1) * 100)).toFixed(1) : null,
+        basis: 'Price relative to marked net asset value. This is the BDC valuation test - '
+             + 'earnings multiples do not describe a marked loan book.',
+      },
+      distribution: {
+        ttmNetInvestmentIncomeB: B(nii.value),
+        ttmDistributionsB: B(divs.value != null ? Math.abs(divs.value) : null),
+        coverageRatio: rnd(coverage),
+        derivation: { nii: nii.method, distributions: divs.method },
+      },
+      portfolio: {
+        fairValueB: B(num(fv)), costB: B(num(cost)),
+        markToCostRatio: rnd(markRatio),
+        unrealisedPositionB: (num(fv) && num(cost)) ? B(num(fv) - num(cost)) : null,
+      },
+      leverage: {
+        debtB: B(num(debt)), netAssetsB: B(num(equity)),
+        debtToEquity: rnd(leverage),
+        statutoryCapNote: 'BDCs may generally carry up to 2:1 debt to equity.',
+        resolvedDebtConcept: debt ? debt.concept : null,
+      },
+      sharesOutstandingB: num(shares) ? +(num(shares) / 1e9).toFixed(3) : null,
+      flags,
+      source: 'SEC XBRL (as filed) + live quote',
+    });
+  } catch (e) {
+    bad(res, 500, `bdc analyze failed: ${e.message}`);
+  }
+});
+
 export default router;
