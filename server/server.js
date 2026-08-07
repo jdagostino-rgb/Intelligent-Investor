@@ -22,6 +22,7 @@ import valuationRouter from './valuation.js';
 import edgarRouter, { ttmRouter, bdcRouter } from './edgar.js';
 import ownershipRouter from './ownership.js';
 import bondsRouter from './bonds.js';
+import fundsRouter from './funds.js';
 import screenerRouter from './screener.js';
 
 const app  = express();
@@ -56,6 +57,7 @@ app.use('/api/edgar-ttm', ttmRouter);
 app.use('/api/bdc', bdcRouter);
 app.use('/api/ownership', ownershipRouter);
 app.use('/api/bonds', bondsRouter);
+app.use('/api/funds', fundsRouter);
 app.use('/api/screen', screenerRouter);
 
 // ── Simple in-memory cache ────────────────────────────────────────────
